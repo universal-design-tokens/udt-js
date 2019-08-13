@@ -60,9 +60,3 @@ typings/
 ### VisualStudioCode ###
 .vscode/*
 .history
-
-
-#### Project-specific ignores ####
-
-lib/
-
