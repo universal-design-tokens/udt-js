@@ -2,6 +2,7 @@ import {
   REFERENCE_PREFIX,
   ESCAPE_CHAR,
   idToReference,
+  referenceToId,
   escapeStringValue,
   unescapeStringValue,
   isReference,
@@ -18,6 +19,12 @@ describe('idToReference()', () => {
   test('does not alter ID portion', () => {
     const testRef = idToReference(testId);
     expect(testRef.substring(REFERENCE_PREFIX.length)).toBe(testId);
+  });
+});
+
+describe('referenceToId()', () => {
+  test('extracts ID name from reference', () => {
+    expect(referenceToId('@barfoo')).toBe('barfoo');
   });
 });
 
@@ -108,5 +115,9 @@ describe('isReference()', () => {
 
   test('detects non references', () => {
     expect(isReference(id)).toBe(false);
+  });
+
+  test('rejects non-string values', () => {
+    expect(isReference(123)).toBe(false);
   });
 });

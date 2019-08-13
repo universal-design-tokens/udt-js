@@ -1,19 +1,20 @@
 {
-  "colors": [
+  "type": "color",
+  "tokens": [
     {
       "id": "red",
       "name": "Red",
-      "color": "#ff0000"
+      "value": "#ff0000"
     },
     {
       "id": "ocean-blue",
       "name": "Ocean Blue",
-      "color": "#0000ff"
+      "value": "#0000ff"
     },
     {
       "id": "border-color",
       "description": "Default color for borders on UI elements",
-      "color": "@red"
+      "value": "@red"
     }
   ]
 }

@@ -1,12 +1,11 @@
-const { File } = require('@udt/lib');
+const { UdtFile } = require('@udt/lib');
+const { exportTokensToScssVariableStatements } = require('./scss-helper');
 
 // Parse an existing UDT file
-File.load('../lib/test/data/colors.udt').then((udtFile) => {
+UdtFile.load('../lib/test/data/colors.udt').then((udtFile) => {
   console.log('/* === SASS vars (resolved values) === */\n');
-  for (const color of udtFile.colors) {
-    if (color.description) {
-      console.log(`// ${color.description}`);
-    }
-    console.log(`$color-${color.id}: ${color.color};\n`);
-  }
+  console.log(exportTokensToScssVariableStatements(udtFile));
+
+}).catch((error) => {
+  console.error(`Unable to load UDT file, due to: ${error}`);
 });

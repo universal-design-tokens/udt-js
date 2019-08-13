@@ -1,47 +1,48 @@
-import Token, { descriptionPropName } from './token';
-import { REFERENCE_PREFIX, ESCAPE_CHAR, escapeStringValue } from './reference-utils';
-import { UdtParseError } from './errors';
+import Token from './token';
+import { ESCAPE_CHAR, escapeStringValue } from './reference-utils';
+import { UdtParseError, UdtModelIntegrityError } from './errors';
+
+import MockToken from './test/mock-token';
+import MockParentNode from './test/mock-parent-node';
+import MockContainer from './test/mock-container';
 
 const tokenId = 'testId';
+const tokenName = 'test token #1';
+const testValue = 42;
 
 describe('Core Token properties', () => {
   let token: Token;
 
   beforeEach(() => {
-    token = new Token({ id: tokenId });
+    token = new MockToken({ name: tokenName, value: testValue });
   });
 
-  test('token\'s ID is accessible', () => {
+  test('token\'s ID can be set', () => {
+    token.id = tokenId;
     expect(token.id).toBe(tokenId);
   });
 
-  test('token\'s name matches ID', () => {
-    expect(token.name).toBe(tokenId);
+  test('token\'s ID can be cleared', () => {
+    token.id = tokenId;
+    token.id = undefined;
+    expect(token.id).toBeUndefined();
   });
 
-  test('token\'s name can be customised without altering ID', () => {
-    const customName = 'customName';
-    token.name = customName;
+  test('resetting token\'s ID works', () => {
+    // This test is to check a code branch that
+    // skips validation when the new ID is the
+    // same as the existing one.
+    token.id = tokenId;
+    token.id = tokenId;
     expect(token.id).toBe(tokenId);
-    expect(token.name).toBe(customName);
   });
 
-  test('custom token name can be cleared by setting it to undefined', () => {
-    // Set a custom handle
-    const customName = 'customName';
-    token.name = customName;
-    // Now clear it
-    token.name = undefined;
-    // Without the custom handle, .handle should fall back to the .name
-    expect(token.name).toBe(tokenId);
+  test('creating token without a name throws a UdtParseError', () => {
+    expect(() => new MockToken({} as any)).toThrow(UdtParseError);
   });
 
-  test('creating token without an ID throws a TypeError', () => {
-    expect(() => new Token({})).toThrow(TypeError);
-  });
-
-  test('creating token with no args throws a UdtParseError', () => {
-    expect(() => new Token()).toThrow(UdtParseError);
+  test('creating token with no args throws a TypeError', () => {
+    expect(() => new MockToken(undefined as any)).toThrow(TypeError);
   });
 
   test('setting a non-string ID throws a TypeError', () => {
@@ -61,25 +62,29 @@ describe('Core Token properties', () => {
       'id with spaces',
       // '1-id-starting-with-number',
       'id*with.invalid=chars',
+      1337,
+      false,
+      null,
     ];
 
     invalidIds.forEach((invalidId) => {
       expect(() => {
-        new Token({ id: invalidId }); // eslint-disable-line no-new
+        token.id  = invalidId as any;
       }).toThrow(TypeError);
     });
   });
 
-  test('setting a non-string name throws a TypeError', () => {
-    expect(() => {
-      token.name = 42 as any;
-    }).toThrow(TypeError);
-  });
+  test('setting a duplicate ID throws a UdtModelIntegrityError error', () => {
+    const container = new MockContainer({name: 'test container'});
+    const otherToken = new MockToken({name: 'other', value: 123});
 
-  test('setting an empty string name throws a TypeError', () => {
+    container.appendChild(token);
+    container.appendChild(otherToken);
+
+    token.id = tokenId;
     expect(() => {
-      token.name = '';
-    }).toThrow(TypeError);
+      otherToken.id = tokenId;
+    }).toThrow(UdtModelIntegrityError);
   });
 
   test('getting the referenced token for an unknown property throws a RangeError', () => {
@@ -92,14 +97,15 @@ describe('Core Token properties', () => {
 
 describe('Token description', () => {
   const tokenDescription = 'test description';
-  const token2id = 'token2';
+  const token2name = 'the second test token';
+  const token2value = 666;
 
   let token: Token;
   let token2: Token;
 
   beforeEach(() => {
-    token = new Token({ id: tokenId });
-    token2 = new Token({ id: token2id });
+    token = new MockToken({ name: tokenName, value: testValue, id: tokenId });
+    token2 = new MockToken({ name: token2name, value: token2value });
   });
 
   test('token\'s description is accessible', () => {
@@ -109,12 +115,12 @@ describe('Token description', () => {
 
   test('token\'s description is not a referenced value', () => {
     token.description = tokenDescription;
-    expect(token.isReferencedValue(descriptionPropName)).toBe(false);
+    expect(token.isReferencedValue('description')).toBe(false);
   });
 
   test('token\'s description\'s referenced token is undefined', () => {
     token.description = tokenDescription;
-    expect(token.getReferencedToken(descriptionPropName)).toBeUndefined();
+    expect(token.getReferencedToken('description')).toBeUndefined();
   });
 
   test('token\'s description can be cleared by setting it to undefined', () => {
@@ -128,33 +134,47 @@ describe('Token description', () => {
     }).toThrow(TypeError);
   });
 
-  test('setting a non-string description throws a TypeError', () => {
+  test('setting another token as a reference when there is no parewnt throws a UdtModelIntegrityError', () => {
+    token.description = tokenDescription;
+
     expect(() => {
-      token.description = 42 as any;
-    }).toThrow(TypeError);
+      token2.description = token;
+    }).toThrow(UdtModelIntegrityError);
   });
 
   test('setting another token as the description references that token\'s description', () => {
+    const container = new MockContainer({name: 'test container'});
+    container.appendChild(token);
+    container.appendChild(token2);
+
     token.description = tokenDescription;
     token2.description = token;
     expect(token2.description).toBe(tokenDescription);
   });
 
   test('referenced value is identified as such', () => {
+    const container = new MockContainer({name: 'test container'});
+    container.appendChild(token);
+    container.appendChild(token2);
+
     token.description = tokenDescription;
     token2.description = token;
-    expect(token2.isReferencedValue(descriptionPropName)).toBe(true);
+    expect(token2.isReferencedValue('description')).toBe(true);
   });
 
   test('getting referenced value\'s token', () => {
+    const container = new MockContainer({name: 'test container'});
+    container.appendChild(token);
+    container.appendChild(token2);
+
     token.description = tokenDescription;
     token2.description = token;
-    expect(token2.getReferencedToken(descriptionPropName)).toBe(token);
+    expect(token2.getReferencedToken('description')).toBe(token);
   });
 
   test('getting referenced token when non has been set returns undefined', () => {
     token.description = tokenDescription;
-    expect(token.getReferencedToken(descriptionPropName)).toBeUndefined();
+    expect(token.getReferencedToken('description')).toBeUndefined();
   });
 
   test('setting self as referenced token throws an Error', () => {
@@ -164,6 +184,10 @@ describe('Token description', () => {
   });
 
   test('setting cyclical token references throws an Error', () => {
+    const container = new MockContainer({name: 'test container'});
+    container.appendChild(token);
+    container.appendChild(token2);
+
     token.description = tokenDescription;
     token2.description = token;
     expect(() => {
@@ -176,29 +200,28 @@ describe('Token description', () => {
 describe('JSON serialisation', () => {
   const tokenDescription = 'test description';
   const token2id = 'token2';
+  const token2name = 'the second test token';
+  const token2value = 666;
 
   let token: Token;
   let token2: Token;
 
   beforeEach(() => {
-    token = new Token({ id: tokenId });
-    token2 = new Token({ id: token2id });
+    token = new MockToken({ name: tokenName, value: testValue });
+    token2 = new MockToken({ name: token2name, value: token2value, id: token2id });
   });
 
-  test('ID is output by toJSON()', () => {
+  test('name is output by toJSON()', () => {
     const jsonObj = token.toJSON();
-    expect(jsonObj.id).toBe(tokenId);
+    expect(jsonObj.name).toBe(tokenName);
   });
 
-  test('custom name is output by toJSON(), if set', () => {
-    const customName = 'Test name';
-    token.name = customName;
-    const jsonObj = token.toJSON();
-    expect(jsonObj.name).toBe(customName);
-  });
+  test('name is ommitted by toJSON(), if no own name is set', () => {
+    // Need to give token a parent in order to remove its name
+    const parent = new MockParentNode({name: 'test parent'});
+    parent.appendOrSetChild(token, 'parent-name-for-token');
+    token.clearOwnName();
 
-  test('name is ommitted by toJSON(), if no custom name is set', () => {
-    token.name = undefined;
     const jsonObj = token.toJSON();
     expect(jsonObj).not.toHaveProperty('name');
   });
@@ -216,21 +239,15 @@ describe('JSON serialisation', () => {
     expect(jsonObj.description).toBe(escapeStringValue(testDescription));
   });
 
-
-  test('description starting with reference prefix is correctly escaped by toJSON()', () => {
-    const testDescription = `${REFERENCE_PREFIX}${tokenDescription}`;
-    token.description = testDescription;
-    const jsonObj = token.toJSON();
-    expect(jsonObj.description).toBe(escapeStringValue(testDescription));
-  });
-
   test('description is ommitted by toJSON() if it was not set', () => {
-    token.description = undefined;
     const jsonObj = token.toJSON();
-    expect(jsonObj).not.toHaveProperty(descriptionPropName);
+    expect(jsonObj).not.toHaveProperty('description');
   });
 
   test('token reference is output toJSON() if description references another token', () => {
+    const parent = new MockContainer({name: 'parent'});
+    parent.appendChild(token);
+    parent.appendChild(token2);
     const token2Description = 'another description';
     token2.description = token2Description;
     token.description = token2;
@@ -240,78 +257,27 @@ describe('JSON serialisation', () => {
 });
 
 
-describe('Extending base Token type', () => {
-  const numberThingPropName = 'numberThing';
-  const testNumberThingValue = 666;
-
-  class ExtendedToken extends Token {
-    public numberThing: number;
-
-    static isValidNumberThing(val: any): val is number {
-      return typeof val === 'number';
-    }
-
-    static isExtendedToken(token: any): token is ExtendedToken {
-      return token instanceof ExtendedToken;
-    }
-
-    constructor(data: any) {
-      const {
-        numberThing,
-        ...rest
-      } = data;
-
-      super(rest);
-
-      this._setupTokenProp(
-        numberThingPropName,
-        ExtendedToken.isValidNumberThing,
-        ExtendedToken.isExtendedToken
-      );
-      this.numberThing = numberThing;
-    }
-  }
-
-  test('extended token type can be instantiated', () => {
-    const extendedToken = new ExtendedToken({
-      id: tokenId,
-      numberThing: testNumberThingValue
-    });
-
-    expect(extendedToken.id).toBe(tokenId);
-    expect(extendedToken.numberThing).toBe(testNumberThingValue);
-  });
-
-  test('extended token with additional, non-string values is output correctly', () => {
-    const extendedToken = new ExtendedToken({
-      id: tokenId,
-      numberThing: testNumberThingValue
-    });
-
-    const jsonObj = extendedToken.toJSON();
-    expect(jsonObj[numberThingPropName]).toBe(testNumberThingValue);
-  });
-});
-
-
 describe('Constructing from data', () => {
   const goodObj = {
     id: 'testId',
     name: 'testName',
+    value: 111,
     description: 'testDescription',
   };
 
   const badObj = {
     name: 'validName',
+    value: 'validValue',
     foo: 42,
   };
 
-  const badNoIdObj = {
+  const badNoNameObj = {
+    value: 'validValue',
     foo: 42,
   };
 
   test('constructing valid data works', () => {
-    const t = new Token(goodObj);
+    const t = new MockToken(goodObj);
     expect(t.id).toBe(goodObj.id);
     expect(t.name).toBe(goodObj.name);
     expect(t.description).toBe(goodObj.description);
@@ -319,25 +285,25 @@ describe('Constructing from data', () => {
 
   test('data with invalid property throws UdtParseError', () => {
     expect(() => {
-      new Token(badObj); // eslint-disable-line no-new
+      new MockToken(badObj); // eslint-disable-line no-new
     }).toThrow(UdtParseError);
   });
 
-  test('data with no ID throws TypeError', () => {
+  test('data with no name throws UdtParseError', () => {
     expect(() => {
-      new Token(badNoIdObj); // eslint-disable-line no-new
+      new MockToken(badNoNameObj as any); // eslint-disable-line no-new
     }).toThrow(UdtParseError);
   });
 
   test('array data throws UdtParseError', () => {
     expect(() => {
-      new Token([]); // eslint-disable-line no-new
+      new MockToken([] as any); // eslint-disable-line no-new
     }).toThrow(UdtParseError);
   });
 
   test('string data throws UdtParseError', () => {
     expect(() => {
-      new Token('test'); // eslint-disable-line no-new
+      new MockToken('test' as any); // eslint-disable-line no-new
     }).toThrow(UdtParseError);
   });
 });

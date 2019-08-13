@@ -1,133 +1,165 @@
-import Referencer from './referencer';
+import { UdtModelIntegrityError } from "./errors";
+import * as refUtils from './reference-utils';
 
 /**
- * Function that, given an object will retrieve a Property instance
- * owned by that object.
+ * Retrieves the property-owning object identified
+ * by the given ID.
  */
-export type PropertyGetter<V, T> = (object: T) => Property<V, T>;
-
+export type Dereferencer<T> = (id: string) => T | undefined;
 
 /**
- * A Property that may either have a value or reference to an object
- * which itself has a Property instance.
+ * Retrieves the property of the given property-owning
+ * object.
  */
-export default class Property<V, T> implements Referencer<T> {
-  private _value?: V;
-  private _objRef?: T;
+export type PropGetter<T,V> = (propOwner: T) => Property<T,V>;
+
+/**
+ * Checks that a given value is of a certain type.
+ */
+export type ValueCheckerFn<V> = (val: any) => boolean;
+
+/**
+ * A Property that may either have a value or reference to a value on
+ * another object.
+ */
+export default class Property<T,V> {
+  readonly #owner: T;
+  readonly #dereference: Dereferencer<T>;
+  readonly #getProp: PropGetter<T,V>;
+  readonly #checkValue: ValueCheckerFn<V>;
+
+  #value: V | undefined;
+  #referenceId: string | undefined;
 
   /**
-   * Constructs a new property instance.
+   * Constructs a new property.
    *
-   * @param getReferencedProperty A function that returns the corresponding
-   *                              Property from a referenced object.
+   * @param owner       The object that owns this property
+   *                    (used for detecting circular references)
+   * @param checkValFn  Function to validate new values.
+   * @param derefFn     Function to retrieve the object identified by
+   *                    a given ID.
+   * @param getPropFn   Function to retrieve the property object corresponding
+   *                    to this one from a given object.
    */
-  constructor(
-    private getReferencedProperty: PropertyGetter<V, T>
-  ) {}
-
-  /**
-   * Checks whether this property is a reference to an object.
-   */
-  isReference(): this is ReferenceProperty<V, T> {
-    return this._objRef !== undefined;
+  constructor(owner: T, checkValFn: ValueCheckerFn<V>, derefFn: Dereferencer<T>, getPropFn: PropGetter<T,V>) {
+    this.#owner = owner;
+    this.#dereference = derefFn;
+    this.#getProp = getPropFn;
+    this.#checkValue = checkValFn;
   }
 
   /**
-   * Checks whether this property ultimately references a certain
+   * Indicates whether this property references the value of another
    * object.
    *
-   * Property references can be chained, so this method will
-   * recursively follow the chain of property references until
-   * it either finds one that references the given object or it
-   * reaches the end of the chain (i.e. a property that has is
-   * not a reference).
-   *
-   * @param object   The object to search for.
+   * @return  `true` if this property is a reference, `false` if it
+   *          has its own value.
    */
-  references(object: T): boolean {
-    const objectProp = this.getReferencedProperty(object);
-    return this.referencesProperty(objectProp);
+  isReference(): boolean {
+    return this.#referenceId !== undefined;
   }
 
   /**
-   * Checks whether this property ultimately references another
+   * Retrieves the object that is being directly referenced by this
    * property.
    *
-   * @param otherProp  The other property to search for.
+   * @param originalRequestor   The object from which the chain of dereferencing
+   *                            originates. Used to detect circular references.
+   *
+   * @return  The object being referenced by this property.
+   *
+   * @throws {UdtModelIntegrityError}   If this property is not referencing anything
+   *                                    (i.e. has its own value), or if there were
+   *                                    problems dereferencing the target object.
    */
-  private referencesProperty(otherProp: Property<V, T>): boolean {
-    const referencedObj = this._objRef;
-    if (referencedObj === undefined) {
-      return false;
-    } else {
-      const referencedProp = this.getReferencedProperty(referencedObj);
-      if (referencedProp === otherProp) {
-        return true;
-      }
-      else {
-        return referencedProp.referencesProperty(otherProp);
-      }
-    }
-  }
-
-  /**
-   * Sets another object, which itself contains a Property, to be the source
-   * of this property's value.
-   *
-   * This will clear any value this property has.
-   *
-   * @param object   The other object that should be referenced.
-   */
-  setReference(object: T) {
-    const refObjectProp = this.getReferencedProperty(object);
-    if ( refObjectProp === this || refObjectProp.referencesProperty(this) ) {
-      throw new Error('Cyclical reference detected. An object cannot reference itself.');
-    }
-    this._objRef = object;
-    delete this._value;
-  }
-
-  /**
-   * Sets this property's value.
-   *
-   * This will clear any reference to another property that
-   * this property has.
-   *
-   * @param newValue  The new value for this property.
-   */
-  setValue(newValue?: V) {
-    this._value = newValue;
-    delete this._objRef;
-  }
-
-  /**
-   * Retrieves this property's fully de-referenced value.
-   *
-   * If this property has its own value, it will be returned.
-   * If this property references an object, then the value of the
-   * corresponding property of that object will be returned
-   * (potentially recursing along the reference chain, if necessary).
-   */
-  getValue(): V | undefined {
-    if ( this._objRef !== undefined ) {
-      // Grab the ref's value
-      return this.getReferencedProperty(this._objRef).getValue();
+  getReferencedObj(originalRequestor: T = this.#owner): T {
+    if (this.#referenceId !== undefined) {
+      return this._safelyDereference(this.#referenceId, originalRequestor);
     }
     else {
-      return this._value;
+      throw new UdtModelIntegrityError('No reference ID has been set');
     }
   }
 
   /**
-   * Retrieves the object being referenced by this property, if any.
+   * Retrieves the value of, or referenced by, this property.
+   *
+   * @param originalRequestor   The object from which the chain of dereferencing
+   *                            originates. Used to detect circular references.
+   *
+   * @return  The value of, or referenced by, this property.
    */
-  getReference(): T | undefined {
-    return this._objRef;
+  getValue(originalRequestor: T = this.#owner): V {
+    if (this.#referenceId !== undefined) {
+      const referencedProp = this.#getProp(this.getReferencedObj(originalRequestor));
+      return referencedProp.getValue(originalRequestor);
+    }
+    else {
+      return this.#value as V;
+    }
   }
-}
 
-interface ReferenceProperty<V, T> extends Property<V, T> {
-  isValue(): false;
-  getValue(): undefined;
-  getReference(): T;
+  /**
+   * Sets the value or reference of this property.
+   *
+   * @param valueOrRef  The value or reference to set on this property.
+   */
+  setValueOrRef(valueOrRef: V|string, checkId = true): void {
+    if (refUtils.isReference(valueOrRef)) {
+      const id = refUtils.referenceToId(valueOrRef);
+
+      if (checkId) {
+        // Check that the ID actually references something:
+        this._testId(id);
+      }
+
+      this.#referenceId = id;
+      this.#value = undefined;
+    }
+    else {
+      const unescapedValue = refUtils.unescapeStringValue(valueOrRef);
+      if (this.#checkValue(unescapedValue)) {
+        this.#value = unescapedValue;
+        this.#referenceId = undefined;
+      }
+      else {
+        throw new TypeError(`${valueOrRef} is not a valid value for this property.`);
+      }
+    }
+  }
+
+  /**
+   * Retrieves the object referenced by the given ID and checks it
+   * exists and is not a circular reference.
+   *
+   * If it does not exist or is a circular referece, an error is thrown.
+   *
+   * @param id                  The ID of the object to retrieve.
+   * @param originalRequestor   The object to compare agains when checking
+   *                            for circular references.
+   *
+   * @return  The retrieved object.
+   *
+   * @throws {UdtModelIntegrityError} If the ID does not reference any object
+   *                                  or if it is a circular reference.
+   */
+  private _safelyDereference(id: string, originalRequestor: T): T {
+    // console.log(`Property._safelyDereference(): this = `, this);
+    // console.log(`Property._safelyDereference(): #dereference = `, this.#dereference);
+    const referencedObject = this.#dereference(id);
+
+    if (referencedObject === undefined) {
+      throw new UdtModelIntegrityError(`Cannot find object referenced by ID: ${id}`);
+    }
+    if (referencedObject === originalRequestor) {
+      throw new UdtModelIntegrityError('Circular reference detected');
+    }
+    return referencedObject;
+  }
+
+  private _testId(id: string): void {
+    const referenceObject = this._safelyDereference(id, this.#owner);
+    this.#getProp(referenceObject).getValue(this.#owner);
+  }
 }

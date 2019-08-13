@@ -1,8 +1,8 @@
+import UdtNode from './node';
 import Property from './property';
-import { addPrivateProp, addPublicProp } from './utils';
 import { idToReference, escapeStringValue } from './reference-utils';
-import { UdtParseError } from './errors';
-import DeferredReference from './deferred-reference';
+import { UdtModelIntegrityError, UdtParseError } from './errors';
+import { TokenData } from './schema';
 
 const idRegex = /^\w[-_\w\d]*$/;
 
@@ -15,13 +15,6 @@ const idRegex = /^\w[-_\w\d]*$/;
  */
 export type CheckerFn<V> = (val: any) => val is V;
 
-/**
- * Type alias for the token's internal properties object.
- */
-type InternalTokenProps<V, T> = {
-  [propName: string]: Property<V, T>
-};
-
 
 /**
  * Checks if the input is a valid token ID.
@@ -29,16 +22,7 @@ type InternalTokenProps<V, T> = {
  * @param id  The id to check.
  */
 function isValidId(id: any): id is string {
-  return (typeof id === 'string') && idRegex.test(id);
-}
-
-/**
- * Checks if the input is a string that value and therefore a valid name.
- *
- * @param name The name to check.
- */
-function isValidName(name: any): name is string {
-  return (typeof name === 'string') && (name.length > 0);
+  return (id === undefined) || (typeof id === 'string') && idRegex.test(id);
 }
 
 /**
@@ -55,24 +39,6 @@ function isValidDescription(description: any): description is string | undefined
 }
 
 /**
- * The name of the Token class's `name` property.
- */
-const namePropName = 'name';
-
-/**
- * The name of the Token class's `id` property.
- */
-const idPropName = 'id';
-
-/**
- * The name of the Token class's "description" property.
- *
- * May be used with tokens' `isReferencedValue()` and
- * `getReferencedToken()` methods.
- */
-export const descriptionPropName = 'description';
-
-/**
  * Base class for all Token types.
  *
  * This class implements the properties that are common to all
@@ -86,10 +52,10 @@ export const descriptionPropName = 'description';
  * any derived token type to a JSON object that can be added to a
  * UDT file.
  */
-export default class Token {
-  private _id = '';
-  private _name?: string;
-  private _props: InternalTokenProps<any, Token>;
+export default abstract class Token<V = any, VT extends Token<any,any> = any> extends UdtNode {
+  private _id: string | undefined;
+  #value: Property<(VT | this), V>;
+  #description: Property<Token, (string | undefined)>;
 
   /**
    * The token's ID.
@@ -100,19 +66,42 @@ export default class Token {
    * to ensure that it is a valid token ID. In the event that
    * it is not, a `TypeError` will be thrown.
    */
-  public id: string;
+  public get id(): string | undefined {
+    return this._id;
+  }
+
+  public set id(newId: string | undefined) {
+    if (newId === this._id) {
+      return;
+    }
+    if (!isValidId(newId)) {
+      throw new TypeError(`"${newId}" is not a valid Token ID.`);
+    }
+    const topParent = this.getTopParent();
+    if (newId !== undefined && topParent !== undefined && topParent.hasTokenWithId(newId)) {
+      throw new UdtModelIntegrityError(`Cannot set ${newId} as the Token ID, as another token already has that ID.`);
+    }
+    this._id = newId;
+  }
 
   /**
-   * The optional display name for this token.
+   * Helper for property setters that want to accept suitable Tokens as a shortcut
+   * for their reference.
    *
-   * For convenience, if no `name` value was assigned, but you read
-   * this property then the token's current `id` value will be returned.
-   *
-   * When (re-)setting a token's name, checks will be performed to
-   * ensure that it is a string value. In the event that it is not,
-   * a `TypeError` will be thrown.
+   * @param prop
+   * @param newVal
    */
-  public name?: string;
+  protected static _setPropValue<PT extends Token,PV>(prop: Property<PT,PV>, newVal: PT | PV | string, checkReference = true) {
+    if (newVal instanceof Token) {
+      if (newVal.id === undefined) {
+        throw new TypeError('Cannot reference a token that does not have an ID');
+      }
+      prop.setValueOrRef(idToReference(newVal.id), checkReference);
+    }
+    else {
+      prop.setValueOrRef(newVal, checkReference);
+    }
+  }
 
   /**
    * The optional description text for this token.
@@ -135,7 +124,40 @@ export default class Token {
    * `undefined`. In the event that it is neither, a `TypeError` will
    * be thrown.
    */
-  public description?: string | Token | DeferredReference<Token>;
+  public get description(): string | Token | undefined {
+    return this.#description.getValue();
+  }
+
+  public set description(newDescr: string | Token | undefined) {
+    Token._setPropValue(this.#description, newDescr);
+  }
+
+  /**
+   * This token's value.
+   *
+   * This may also reference another token's value. To create
+   * such a reference, simply assign the other token object to
+   * this `value` property.
+   *
+   * E.g.: `thisColorToken.value = otherColorToken;`
+   *
+   * Note that _reading_ this property will always return the actual
+   * _value_. In the above example, the referenced token's value will
+   * be returned.
+   *
+   * When (re-)setting a value, checks will be performed to ensure that
+   * it is a value or compatible Token type. In the event that it is
+   * neither, a `TypeError` will be thrown.
+   */
+  public get value(): V | VT | string {
+    return this.#value.getValue();
+  }
+
+  public set value(newVal: V | VT | string) {
+    Token._setPropValue(this.#value, newVal);
+  }
+
+
 
   /**
    * Constructs a token object from a JSON object.
@@ -152,68 +174,57 @@ export default class Token {
    *                  `name` and/or `description` of this
    *                  token.
    */
-  constructor(jsonObj?: any) {
-    if (typeof jsonObj !== 'object' || Array.isArray(jsonObj)) {
-      throw new UdtParseError('Cannot parse token from non-object.');
-    }
-
-    const {
+  constructor(
+    {
+      value,
       id,
-      name,
       description,
-      ...rest
-    } = jsonObj;
+      type,
+      ...nodeProps
+    }: TokenData
+  ) {
+    super(nodeProps);
 
-    if (Object.keys(rest).length > 0) {
-      throw new UdtParseError(`Unexpected properties in input data: ${Object.keys(rest).join(', ')}`);
+    if (type !== undefined && type !== this._getOwnType()) {
+      throw new UdtParseError(`Cannot construct a ${this._getOwnType()} token from data with type = ${type}.`);
     }
 
-    // Enumerable "id" prop with get & set
-    // function to validate names.
-    addPrivateProp(this, '_id');
-    addPublicProp(
-      this,
-      idPropName,
-      () => this._id,
-      (newId) => {
-        if (!isValidId(newId)) {
-          throw new TypeError(`"${newId}" is not a valid Token ID.`);
-        }
-        this._id = newId;
-      },
-    );
+    // Assign ID
     this.id = id;
-
-    // Enumerable "name" prop for setting custom display name,
-    // but returns the id as a fallback in case no name was set.
-    addPrivateProp(this, '_name');
-    addPublicProp(
-      this,
-      namePropName,
-      () => {
-        if (this._name !== undefined) {
-          return this._name;
-        }
-        return this.id;
-      },
-      (newName) => {
-        if (newName !== undefined && !isValidName(newName)) {
-          throw new TypeError(`"${newName}" is not a valid Token name.`);
-        }
-        this._name = newName;
-      },
-    );
-    this.name = name;
-
-    // Internal object that holds all token properties.
-    addPrivateProp(this, '_props');
-    this._props = {};
 
     // Standard "description" property that is common to all Token
     // types.
-    this._setupTokenProp(descriptionPropName, isValidDescription, Token.isToken);
-    this.description = description;
+    this.#description = new Property(
+      this,
+      isValidDescription,
+      this._getTokenById.bind(this),
+      (propOwner: Token) => propOwner.#description,
+    );
+
+    // set description without checking references, since
+    // we do not currently have a parent
+    Token._setPropValue(this.#description, description, false);
+
+    // Standard "description" property that is common to all Token
+    // types.
+    this.#value = new Property(
+      this,
+      this._isValidValue.bind(this),
+      this._getAndValidateTokenById.bind(this),
+      (propOwner: (VT | this)) => propOwner.#value,
+    );
+
+    // set value without checking references, since
+    // we do not currently have a parent
+    Token._setPropValue(this.#value, value, false);
   }
+
+
+  public checkReferences(): void {
+    this.description;
+    this.value;
+  }
+
 
   /**
    * Checks if the input is an instance of the
@@ -225,54 +236,28 @@ export default class Token {
     return token instanceof Token;
   }
 
-  /**
-   * Adds or configures a property of this token that can hold either a
-   * value or a reference to another token's value.
-   *
-   * @param propName        The name of the property to add.
-   * @param valueCheckerFn  A function that checks if a value is permitted
-   *                        for this property.
-   * @param refCheckFn      A function that checks if a token instance is
-   *                        permitted as a reference value for this property.
-   */
-  protected _setupTokenProp<V, T extends Token>(
-    propName: string,
-    valueCheckerFn: CheckerFn<V>,
-    refCheckFn: CheckerFn<T>
-  ) {
-    // Create property object and add to internal list
-    this._props[propName] = new Property<any, Token>(
-      (referencedToken: Token) => {
-        return referencedToken._props[propName];
+  private _getTokenById(id: string): Token | undefined {
+    const topParent = this.getTopParent();
+    if (topParent !== undefined) {
+      const token = topParent.getTokenById(id);
+      if (token instanceof Token) {
+        return token;
       }
-    );
-
-    // Now add public property with intelligent getter and
-    // setter
-    addPublicProp(
-      this,
-      propName,
-      (): V => this._props[propName].getValue() as V,
-      (value: V | T | DeferredReference<T>) => {
-        const prop = this._props[propName];
-        if (value instanceof DeferredReference) {
-          value.prop = prop;
-        }
-        else {
-          if (refCheckFn(value)) {
-            // Reference to another token
-            prop.setReference(value);
-          }
-          else if (valueCheckerFn(value)) {
-            prop.setValue(value);
-          }
-          else {
-            throw new TypeError(`"${value}" is not a valid value or token reference for property ${propName}.`);
-          }
-        }
-      },
-    );
+    }
+    return undefined;
   }
+
+  private _getAndValidateTokenById(id: string): VT | this | undefined {
+    const token = this._getTokenById(id);
+    if (this._isValidToken(token)) {
+      return token;
+    }
+    throw new TypeError(`Token with ID ${id} does not exist or is not valid for this property.`);
+  }
+
+  protected abstract _isValidValue(value: any): value is V;
+
+  protected abstract _isValidToken(token: any): token is VT | this;
 
   /**
    * Checks if the value of a certain token property is actually
@@ -281,8 +266,15 @@ export default class Token {
    * @param propName  The name of the token property to check.
    */
   isReferencedValue(propName: string) {
-    const prop = this._props[propName];
-    return prop !== undefined && prop.isReference();
+    if (propName === 'description') {
+      return this.#description.isReference()
+    }
+    else if (propName === 'value') {
+      return this.#value.isReference();
+    }
+    else {
+      return false;
+    }
   }
 
   /**
@@ -291,20 +283,40 @@ export default class Token {
    * @param propName  The name of the token property, whose referenced
    *                  token should be retrieved.
    */
-  getReferencedToken(propName: string) {
-    if (!Object.keys(this._props).includes(propName)) {
-      throw new RangeError(`"${propName}" is not a known referencable property of this token type.`);
+  getReferencedToken(propName: string): Token | undefined {
+    try {
+      if (propName === 'description') {
+        return this.#description.getReferencedObj()
+      }
+      else if (propName === 'value') {
+        return this.#value.getReferencedObj();
+      }
+      else {
+        throw new RangeError(`"${propName}" is not a known referencable property of this token type.`);
+      }
     }
-
-    const prop = this._props[propName];
-    return prop.getReference();
+    catch (error) {
+      if (error instanceof UdtModelIntegrityError) {
+        // property is not a reference
+        return undefined;
+      }
+      else {
+        throw error;
+      }
+    }
   }
 
   /**
    * Returns the "@..." reference for this token.
    */
   toReference() {
-    return idToReference(this.id);
+    // TODO: Improve this! (Maybe auto-generate ID at some point?)
+    if (this.id !== undefined) {
+      return idToReference(this.id);
+    }
+    else {
+      throw Error(`Token "${this.name}" has no ID.`);
+    }
   }
 
   /**
@@ -317,25 +329,17 @@ export default class Token {
    */
   toJSON() {
     const output: any = {};
-    Object.keys(this).forEach((propName) => {
-      // Must check for .id or .name first, since neither is stored
-      // in this._props and therefore calling isReferencedValue() with
-      // those prop names would throw an error
-      if (propName === idPropName) {
-        output[propName] = this[propName];
-        return;
-      }
-      if (propName === namePropName) {
-        // Only inlude name in output if one was
-        // actually set
-        if (this._name !== undefined) {
-          output[propName] = this[propName];
-        }
-        return;
-      }
 
-      // One of the other props that we internally store in
-      // this._props
+    // Add own name if there is one
+    if (this.hasOwnName()) {
+      output.name = this.name;
+    }
+
+    output.id = this.id;
+    output.type = this.type;
+
+    // props that may be references
+    for(const propName of ['description', 'value']) {
       const referencedToken = this.getReferencedToken(propName);
       if (referencedToken !== undefined) {
         // This prop's value is a token reference
@@ -350,7 +354,9 @@ export default class Token {
           output[propName] = value;
         }
       }
-    });
+    }
+
     return output;
   }
+
 }

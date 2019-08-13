@@ -15,6 +15,7 @@
   "author": "James Nash (http://cirrus.twiddles.com/)",
   "license": "ISC",
   "dependencies": {
-    "@udt/lib": "^0.1.0"
+    "@udt/lib": "^0.1.0",
+    "lodash.kebabcase": "^4.1.1"
   }
 }

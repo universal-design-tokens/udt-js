@@ -1,127 +1,213 @@
-import Property from './property';
+import Property, { PropGetter } from './property';
+import * as refUtils from './reference-utils';
+import { UdtModelIntegrityError } from './errors';
+
+
+
+class MockObjectRegistry {
+  #objects: {[id: string]: MockObject} = {};
+
+  getObject = jest.fn((id: string) => this.#objects[id] );
+
+  add(id: string, obj: MockObject) {
+    this.#objects[id] = obj;
+  }
+}
 
 class MockObject {
-  prop: Property<number, MockObject>;
+  registry: MockObjectRegistry;
+  prop: Property<MockObject, number>;
+  valueCheckFn = jest.fn((val: number) => typeof val === 'number');
 
-  static getProp(mockObj: MockObject) {
-    return mockObj.prop;
-  }
-
-  constructor() {
-    this.prop = new Property(MockObject.getProp);
+  constructor(registry: MockObjectRegistry, propGetter: PropGetter<MockObject, number>) {
+    this.registry = registry;
+    this.prop = new Property(
+      this,
+      this.valueCheckFn,
+      this.registry.getObject,
+      propGetter,
+    );
   };
 }
 
 describe('Property', () => {
   const testVal = 42;
   const testVal2 = 666;
-  let prop: Property<number, MockObject>;
+  const testId = 'other';
+
+  let mockGetPropFn: jest.Mock;
+  let mockRegistry: MockObjectRegistry;
+  let mockObj: MockObject;
+  let prop: Property<MockObject, number>;
 
   beforeEach(() => {
-    prop = new Property(MockObject.getProp);
+    mockRegistry = new MockObjectRegistry();
+    mockGetPropFn = jest.fn((propOwner: MockObject) => propOwner.prop);
+    mockObj = new MockObject(mockRegistry, mockGetPropFn);
+    prop = mockObj.prop;
   });
 
-  test('has a default value of undefined', () => {
-    expect(prop.getValue()).toBeUndefined();
-  });
-
-  test('does not reference a value by default', () => {
+  test('is not a reference by default', () => {
     expect(prop.isReference()).toBe(false);
   });
 
-  test('setValue() can set a value', () => {
-    prop.setValue(testVal);
-    expect(prop.getValue()).toBe(testVal);
-  });
-
-  test('setValue() can set an undefined value', () => {
-    prop.setValue();
+  test('getValue() returns undefined initially', () => {
     expect(prop.getValue()).toBeUndefined();
   });
 
-  test('references() returns false for property that does not reference an object', () => {
-    const otherObj = new MockObject();
-    expect(prop.references(otherObj)).toBe(false);
+  test('getReferencedObj() throws UdtModelIntegrity until either value or prop has been set', () => {
+    expect(() => {
+      prop.getReferencedObj();
+    }).toThrow(UdtModelIntegrityError);
   });
 
-  test('isReference() returns true when a referenced object has been set via setReference()', () => {
-    const obj = new MockObject();
-    prop.setReference(obj);
+  test('a set value can be retrieved', () => {
+    prop.setValueOrRef(testVal);
+    expect(prop.getValue()).toBe(testVal);
+  });
+
+  test('is not a reference after a value has been set', () => {
+    prop.setValueOrRef(testVal);
+    expect(prop.isReference()).toBe(false);
+  });
+
+  test('getReferencedObj() throws UdtModelIntegrity after a value has bee set', () => {
+    prop.setValueOrRef(testVal);
+    expect(() => {
+      prop.getReferencedObj();
+    }).toThrow(UdtModelIntegrityError);
+  });
+
+  test('calls the value checker function when setting a value', () => {
+    prop.setValueOrRef(testVal);
+    expect(mockObj.valueCheckFn).toHaveBeenCalledWith(testVal);
+  });
+
+  test('setting an invalid value throws a TypeError', () => {
+    expect(() => {
+      prop.setValueOrRef(false as any);
+    }).toThrow(TypeError);
+  });
+
+  test('a referenced value can be retrieved', () => {
+    const otherObj = new MockObject(mockRegistry, mockGetPropFn);
+    otherObj.prop.setValueOrRef(testVal2);
+    mockRegistry.add(testId, otherObj);
+
+    prop.setValueOrRef(refUtils.idToReference(testId));
+    expect(prop.getValue()).toBe(testVal2);
+  });
+
+  test('a referenced object can be retrieved', () => {
+    const otherObj = new MockObject(mockRegistry, mockGetPropFn);
+    otherObj.prop.setValueOrRef(testVal2);
+    mockRegistry.add(testId, otherObj);
+
+    prop.setValueOrRef(refUtils.idToReference(testId));
+    expect(prop.getReferencedObj()).toBe(otherObj);
+  });
+
+  test('identifies as a reference correctly', () => {
+    const otherObj = new MockObject(mockRegistry, mockGetPropFn);
+    otherObj.prop.setValueOrRef(testVal2);
+    mockRegistry.add(testId, otherObj);
+
+    prop.setValueOrRef(refUtils.idToReference(testId));
     expect(prop.isReference()).toBe(true);
   });
 
-  test('getReference() returns the referenced object that has been set via setReference()', () => {
-    const obj = new MockObject();
-    prop.setReference(obj);
-    expect(prop.getReference()).toBe(obj);
+  test('setting a reference calls the dereference function', () => {
+    const otherObj = new MockObject(mockRegistry, mockGetPropFn);
+    otherObj.prop.setValueOrRef(testVal2);
+    mockRegistry.add(testId, otherObj);
+
+    prop.setValueOrRef(refUtils.idToReference(testId));
+    expect(mockRegistry.getObject).toHaveBeenCalledWith(testId);
   });
 
-  test('setReference() throws an Error if setting a reference itself', () => {
-    const obj = new MockObject();
-    obj.prop = prop;
-    expect(() => {prop.setReference(obj);}).toThrow(Error);
+  test('setting a reference calls the prop getter function', () => {
+    const otherObj = new MockObject(mockRegistry, mockGetPropFn);
+    otherObj.prop.setValueOrRef(testVal2);
+    mockRegistry.add(testId, otherObj);
+
+    prop.setValueOrRef(refUtils.idToReference(testId));
+    expect(mockGetPropFn).toHaveBeenCalledWith(otherObj);
   });
 
+  test('retrieving a referenced value calls the dereference function', () => {
+    const otherObj = new MockObject(mockRegistry, mockGetPropFn);
+    otherObj.prop.setValueOrRef(testVal2);
+    mockRegistry.add(testId, otherObj);
 
-  describe('referencing an object', () => {
-    let obj: MockObject;
+    prop.setValueOrRef(refUtils.idToReference(testId));
+    // Clear mock since setValueOrRef() called it already
+    mockRegistry.getObject.mockClear();
 
-    beforeEach(() => {
-      obj = new MockObject();
-      obj.prop.setValue(testVal2);
-      prop.setReference(obj);
-    });
-
-    test('getValue() returns referenced object\'s property\'s value', () => {
-      expect(prop.getValue()).toBe(testVal2);
-    });
-
-    test('getValue() returns referenced object\'s property\'s value, even when it changes', () => {
-      obj.prop.setValue(testVal);
-      expect(prop.getValue()).toBe(testVal);
-    });
-
-    test('refences() returns true for directly referenced property', () => {
-      expect(prop.references(obj)).toBe(true);
-    });
+    prop.getValue();
+    expect(mockRegistry.getObject).toHaveBeenCalledWith(testId);
   });
 
+  test('retrieving a referenced value calls the prop getter function', () => {
+    const otherObj = new MockObject(mockRegistry, mockGetPropFn);
+    otherObj.prop.setValueOrRef(testVal2);
+    mockRegistry.add(testId, otherObj);
 
-  describe('with reference chain', () => {
-    let firstObj: MockObject;
-    let middleObj: MockObject;
-    let lastObj: MockObject;
+    prop.setValueOrRef(refUtils.idToReference(testId));
+    // Clear mock since setValueOrRef() called it already
+    mockGetPropFn.mockClear();
 
-    beforeEach(() => {
-      firstObj = new MockObject();
-      middleObj = new MockObject();
-      lastObj = new MockObject();
-
-      prop.setReference(firstObj);
-      firstObj.prop.setReference(middleObj);
-      middleObj.prop.setReference(lastObj);
-      lastObj.prop.setValue(testVal);
-    });
-
-    test('getValue() returns last object\'s property\'s value', () => {
-      expect(prop.getValue()).toBe(testVal);
-    });
-
-    test('getValue() returns last object\'s property\'s value, even when it changes', () => {
-      lastObj.prop.setValue(testVal2);
-      expect(prop.getValue()).toBe(testVal2);
-    });
-
-    test('refences() returns true for intermediate referenced object', () => {
-      expect(prop.references(middleObj)).toBe(true);
-    });
-
-    test('refences() returns true for last referenced object', () => {
-      expect(prop.references(lastObj)).toBe(true);
-    });
-
-    test('setReference() throws an Error if setting cyclical reference', () => {
-      expect(() => {lastObj.prop.setReference(firstObj);}).toThrow(Error);
-    });
+    prop.getValue();
+    expect(mockGetPropFn).toHaveBeenCalledWith(otherObj);
   });
+
+  test('Setting an unknown ID throws a UdtModelIntegrityError', () => {
+    expect(() => {
+      prop.setValueOrRef('@unknown');
+    }).toThrow(UdtModelIntegrityError);
+  });
+
+  test('Setting a reference to owning object throws UdtModelIntegrityError', () => {
+    mockRegistry.add(testId, mockObj);
+
+    expect(() => {
+      prop.setValueOrRef(refUtils.idToReference(testId));
+    }).toThrow(UdtModelIntegrityError);
+  });
+
+  test('retrieving an indirectly referenced value works', () => {
+    const nextId = 'next';
+    const nextObj = new MockObject(mockRegistry, mockGetPropFn);
+    mockRegistry.add(nextId, nextObj);
+
+    const lastId = 'last';
+    const lastObj = new MockObject(mockRegistry, mockGetPropFn);
+    mockRegistry.add(lastId, lastObj);
+
+    lastObj.prop.setValueOrRef(testVal);
+    nextObj.prop.setValueOrRef(refUtils.idToReference(lastId))
+    prop.setValueOrRef(refUtils.idToReference(nextId));
+
+    expect(prop.getValue()).toBe(testVal);
+  });
+
+  test('indirect circular references are detected', () => {
+    mockRegistry.add(testId, mockObj);
+
+    const nextId = 'next';
+    const nextObj = new MockObject(mockRegistry, mockGetPropFn);
+    mockRegistry.add(nextId, nextObj);
+
+    const lastId = 'last';
+    const lastObj = new MockObject(mockRegistry, mockGetPropFn);
+    mockRegistry.add(lastId, lastObj);
+
+    lastObj.prop.setValueOrRef(testVal);
+    nextObj.prop.setValueOrRef(refUtils.idToReference(lastId))
+    prop.setValueOrRef(refUtils.idToReference(nextId));
+
+    expect(() => {
+      lastObj.prop.setValueOrRef(refUtils.idToReference(testId));
+    }).toThrow(UdtModelIntegrityError);
+  });
+
 });
